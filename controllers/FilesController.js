@@ -1,0 +1,95 @@
+import mongo from 'mongodb';
+import { v4 as uuidv4 }from 'uuid';
+import { writeFile } from 'fs/promises';
+import dbClient from '../utils/db';
+import redisClient from '../utils/redis';
+
+export default class FilesController {
+  static async postUpload(request, response) {
+    const verification = await FilesController.verification(request.body, response);
+    if (verification === 'passed') {
+      const usrId = await redisClient.get(`auth_${request.get('X-Token')}`);
+      if (usrId !== null) {
+        const file = {
+          name: request.body.name,
+          type: request.body.type,
+        };
+        if (Object.hasOwn(request.body, 'parentId') === true) {
+          file.parentId = mongo.ObjectID(request.body.parentId);
+        } else file.parentId = 0;
+        if (request.body.type !== 'folder') {
+          const fileName = uuidv4();
+
+          if (process.env.FOLDER_PATH !== undefined) {
+            file.localPath = `${process.env.FOLDER_PATH}/${fileName}`;
+          } else file.localPath = `/tmp/files_manager/${fileName}`;
+
+          const decodedData = Buffer.from(request.body.data, 'base64').toString('utf-8');
+          await writeFile(file.localPath, decodedData);
+        }
+        file.userId = mongo.ObjectID(usrId);
+
+        if (Object.hasOwn(request.body, 'isPublic') === true) file.isPublic = request.body.isPublic;
+        else file.isPublic = false;
+
+        await dbClient.database.collection('files').insertOne(file);
+
+        response.status(201).json({
+          id: file._id,
+          userId: file.userId,
+          name: file.name,
+          type: file.type,
+          isPublic: file.isPublic,
+          parentId: file.parentId,
+        }, );
+      } else response.status(401).json({
+        error: 'Unauthorized'
+      });
+    }
+  }
+
+  static async verification(data, response) {
+    if (Object.hasOwn(data, 'name') === false) {
+      response.status(400).json({
+        error: 'Missing name'
+      });
+      return 'failed';
+    }
+    if (Object.hasOwn(data, 'type') === true) {
+      if (['folder', 'file', 'image'].some((type) => data.type === type) === false) {
+        response.status(400).json({
+          error: 'Missing type'
+        });
+        return 'failed';
+      }
+    } else {
+      response.status(400).json({
+        error: 'Missing type'
+      });
+      return 'failed';
+    }
+    if (Object.hasOwn(data, 'data') === false && data.type !== 'folder') {
+      response.status(400).json({
+        error: 'Missing data'
+      });
+      return 'failed';
+    }
+    if (Object.hasOwn(data, 'parentId') === true) {
+      const usr = await dbClient.database.collection('files').findOne({
+        _id: mongo.ObjectID(data.parentId)
+      }, );
+      if (usr === null) {
+        response.status(400).json({
+          error: 'Parent not found'
+        });
+        return 'failed';
+      }
+      if (usr.type !== 'folder') {
+        response.status(400).json({
+          error: 'Parent is not a folder'
+        });
+      }
+    }
+    return 'passed';
+  }
+}
